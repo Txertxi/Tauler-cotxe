@@ -8,6 +8,8 @@
     <!-- Per tornar al tauler després d'obrir la ràdio o la música -->
     <uses-permission android:name="android.permission.REORDER_TASKS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Per llegir els mapes .map de la carpeta «Mapes» de la memòria interna -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <!-- Perquè l'app pugui veure la llista d'apps amb icona instal·lades a la unitat -->
     <queries>
@@ -21,7 +23,7 @@
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:label="Federicu Tauler V1"
+        android:label="Federicu Tauler V2"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
         <activity
