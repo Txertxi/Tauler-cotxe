@@ -33,6 +33,16 @@ object Prefs {
         get() = getD("alt_offset", 0.0)
         set(v) = putD("alt_offset", v)
 
+    // ---------------------------------------------------------------- mapa
+    var mapZoom: Int
+        get() = p().getInt("map_zoom", 14)
+        set(v) = p().edit().putInt("map_zoom", v).apply()
+
+    /** Mapa atenuat (per a la nit). */
+    var mapDim: Boolean
+        get() = p().getBoolean("map_dim", false)
+        set(v) = p().edit().putBoolean("map_dim", v).apply()
+
     // ---------------------------------------------------------------- botons d'apps
     var defaultsDone: Boolean
         get() = p().getBoolean("defaults_done", false)

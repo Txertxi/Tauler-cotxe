@@ -316,10 +316,11 @@ class AltimeterPainter {
 }
 
 /**
- * Gràfic del viatge a la pàgina Conducció: finestra mòbil de les darreres TripProfile.WINDOW_MIN minuts,
- * amb escala de temps fixa (el traç no es comprimeix mai). La velocitat en rosa, amb l'eix esquerre fix
- * de 0 a Cfg.CHART_KMH_MAX km/h (graella i números cada Cfg.CHART_KMH_STEP), i l'alçada en verd, amb
- * l'eix dret variable, de l'alçada mínima a la màxima de la finestra.
+ * Gràfic de velocitat (rosa) i alçada (verd) d'una finestra de temps del viatge. Les dues escales són
+ * variables: la velocitat va de 0 al màxim de la finestra (graella i números cada 20 km/h) i l'alçada
+ * del mínim al màxim de la finestra (marge mínim de 50 m). L'eix de temps és fix: el traç no es comprimeix
+ * mai i una parada llarga es veu com un forat. Amb `timeLabels`, a baix hi ha l'hora real cada 15 minuts
+ * comptant des de l'inici del viatge (si comença a les 15:16, les marques són 15:16, 15:31, 15:46...).
  */
 class ProfileChartPainter {
     private val panel = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Pal.PANEL }
@@ -331,6 +332,11 @@ class ProfileChartPainter {
     private val grid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Pal.RING
         strokeWidth = 1.5f
+    }
+    private val timeGrid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Pal.RING
+        strokeWidth = 1.5f
+        alpha = 150
     }
     private val pinkLine = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -354,62 +360,96 @@ class ProfileChartPainter {
     private val box = RectF()
     private val path = Path()
 
-    fun draw(c: Canvas, l: Float, t: Float, r: Float, b: Float, p: TripProfile) {
+    fun draw(
+        c: Canvas, l: Float, t: Float, r: Float, b: Float, p: TripProfile,
+        windowMs: Long, timeLabels: Boolean
+    ) {
         box.set(l, t, r, b)
         c.drawRoundRect(box, 14f, 14f, panel)
         c.drawRoundRect(box, 14f, 14f, border)
 
-        // Àrea del traçat: marge a l'esquerra i a la dreta per als números dels eixos.
+        // Àrea del traçat: marge a l'esquerra i a la dreta per als números dels eixos
+        // (i a baix, per a les hores, quan n'hi ha).
         val pl = l + 64f
         val pr = r - 70f
         val pt = t + 46f
-        val pb = b - 16f
+        val pb = b - (if (timeLabels) 46f else 16f)
+
+        val wb = p.windowBounds(windowMs)
+        val sAxis = p.speedAxis(wb)
+        val aAxis = p.altAxis(wb)
 
         pinkTxt.draw(c, "km/h", pl - 8f, t + 28f, 19f, Paint.Align.RIGHT)
         greenTxt.draw(c, "m", pr + 8f, t + 28f, 19f, Paint.Align.LEFT)
 
-        // Velocitat: graella i número a cada 20 km/h, de 0 a 140.
-        val axis = p.altAxis()
-        val steps = (Cfg.CHART_KMH_MAX / Cfg.CHART_KMH_STEP).toInt()
+        // Velocitat: graella i número a cada pas (20 km/h), de 0 al final de l'eix.
+        val top = sAxis[0]
+        val step = sAxis[1]
+        val steps = Math.round(top / step).toInt().coerceAtLeast(1)
         for (i in 0..steps) {
             val y = pb - (pb - pt) * i / steps.toFloat()
             c.drawLine(pl, y, pr, y, grid)
-            pinkTxt.draw(c, Fmt.num(Cfg.CHART_KMH_STEP * i, 0), pl - 8f, y + 7f, 20f, Paint.Align.RIGHT)
+            pinkTxt.draw(c, Fmt.num(step * i, 0), pl - 8f, y + 7f, 20f, Paint.Align.RIGHT)
         }
-        // Alçada: tres números (mínim, mig i màxim), com abans.
+        // Alçada: tres números (mínim, mig i màxim).
         for (i in 0..2) {
             val y = pb - (pb - pt) * i / 2f
-            val av = if (axis == null) "--" else Fmt.num(axis[0] + (axis[1] - axis[0]) * i / 2.0, 0)
+            val av = if (aAxis == null) "--" else Fmt.num(aAxis[0] + (aAxis[1] - aAxis[0]) * i / 2.0, 0)
             greenTxt.draw(c, av, pr + 8f, y + 7f, 20f, Paint.Align.LEFT)
         }
 
-        if (p.n == 0) {
+        if (wb == null) {
             grayTxt.draw(c, "Encara sense dades", (pl + pr) / 2f, (pt + pb) / 2f + 8f, 24f, Paint.Align.CENTER)
             return
         }
+        val w = (wb[1] - wb[0]).toFloat()
 
-        // Escala de temps fixa: el gràfic sencer són WINDOW_MIN minuts. El traç neix a l'esquerra i,
-        // quan s'omple, es desplaça cap a l'esquerra.
-        val denom = (TripProfile.CAP - 1).toFloat()
+        // Hores reals cada 15 minuts, comptant des de l'hora d'inici del viatge.
+        if (timeLabels) {
+            val tz = TimeZone.getDefault()
+            val start = p.startMs
+            var k = if (wb[0] <= start) 0L else (wb[0] - start + QUARTER_MS - 1L) / QUARTER_MS
+            while (true) {
+                val tm = start + k * QUARTER_MS
+                if (tm > wb[1]) break
+                val x = pl + (pr - pl) * ((tm - wb[0]) / w)
+                c.drawLine(x, pt, x, pb, timeGrid)
+                grayTxt.draw(c, Fmt.hm(tm, tz), x, pb + 32f, 19f, Paint.Align.CENTER)
+                k++
+            }
+        }
+
         c.save()
         c.clipRect(pl - 2f, pt - 8f, pr + 10f, pb + 8f)
 
+        // Primera mostra de la finestra (i la que hi ha just abans, perquè el traç entri des de la vora).
+        var from = 0
+        while (from < p.n && p.t[from] < wb[0]) from++
+        if (from > 0) from--
+        val last = p.n - 1
+
         // Alçada (verd).
-        if (axis != null) {
-            val span = max(axis[1] - axis[0], 1.0)
+        if (aAxis != null) {
+            val span = max(aAxis[1] - aAxis[0], 1.0)
             path.rewind()
             var pen = false
             var lx = 0f
             var ly = 0f
-            for (i in 0 until p.n) {
+            for (i in from..last) {
                 val a = p.alt[i]
                 if (a.isNaN()) {
                     pen = false
                     continue
                 }
-                val x = pl + (pr - pl) * i / denom
-                val y = pb - (pb - pt) * ((a - axis[0]) / span).toFloat().coerceIn(0f, 1f)
-                if (pen) path.lineTo(x, y) else path.moveTo(x, y)
+                val x = pl + (pr - pl) * ((p.t[i] - wb[0]) / w)
+                val y = pb - (pb - pt) * ((a - aAxis[0]) / span).toFloat().coerceIn(0f, 1f)
+                val gap = i > 0 && p.t[i] - p.t[i - 1] > TripProfile.GAP_MS
+                if (!pen || gap) {
+                    path.moveTo(x, y)
+                    path.lineTo(x + 0.01f, y)
+                } else {
+                    path.lineTo(x, y)
+                }
                 pen = true
                 lx = x
                 ly = y
@@ -420,14 +460,24 @@ class ProfileChartPainter {
 
         // Velocitat (rosa), per sobre.
         path.rewind()
-        for (i in 0 until p.n) {
-            val x = pl + (pr - pl) * i / denom
-            val y = pb - (pb - pt) * (p.speed[i] / Cfg.CHART_KMH_MAX.toFloat()).coerceIn(0f, 1f)
-            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
-            if (i == p.n - 1) c.drawCircle(x, y, 6f, pinkDot)
+        for (i in from..last) {
+            val x = pl + (pr - pl) * ((p.t[i] - wb[0]) / w)
+            val y = pb - (pb - pt) * (p.speed[i] / top.toFloat()).coerceIn(0f, 1f)
+            val gap = i > 0 && p.t[i] - p.t[i - 1] > TripProfile.GAP_MS
+            if (i == from || gap) {
+                path.moveTo(x, y)
+                path.lineTo(x + 0.01f, y)
+            } else {
+                path.lineTo(x, y)
+            }
+            if (i == last) c.drawCircle(x, y, 6f, pinkDot)
         }
         c.drawPath(path, pinkLine)
         c.restore()
+    }
+
+    private companion object {
+        const val QUARTER_MS = 15L * 60000L
     }
 }
 
@@ -543,6 +593,10 @@ abstract class BasePage(
     private val btnTxt = Txt(Pal.WHITE)
     private val labelTxt = Txt(Pal.GRAY, false)
     private val valueTxt = Txt(Pal.WHITE)
+
+    /** Coordenada de pantalla (píxels) d'un punt virtual; vàlida un cop dibuixat el primer fotograma. */
+    protected fun pxX(x: Float): Float = offX + x * scale
+    protected fun pxY(y: Float): Float = offY + y * scale
 
     protected abstract fun paintPage(c: Canvas)
 

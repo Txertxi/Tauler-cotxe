@@ -73,14 +73,8 @@ object GpsHub {
         altitudeRaw = if (l.hasAltitude()) l.altitude else Double.NaN
         lastFixElapsedMs = SystemClock.elapsedRealtime()
 
-        val accOk = if (accuracy.isNaN()) 0.0 else accuracy
-        trip.onFix(l.elapsedRealtimeNanos / 1_000_000L, speedKmh, accOk)
-        profile.onFix(l.elapsedRealtimeNanos / 1_000_000L, speedKmh, correctedAltitude(), accOk)
-
-        // Avís sonor de velocitat (si està activat als ajustaments).
-        SpeedAlert.onFix(lastFixElapsedMs, speedKmh)
-
-        // Hora GPS: es guarda la diferència amb el rellotge del sistema.
+        // Hora GPS: es guarda la diferència amb el rellotge del sistema (abans d'anotar res al perfil,
+        // perquè les mostres portin l'hora bona des de la primera).
         val off = l.time - System.currentTimeMillis()
         if (!haveClock) {
             clockOffsetMs = off
@@ -88,6 +82,13 @@ object GpsHub {
         } else {
             clockOffsetMs = (clockOffsetMs * 0.8 + off * 0.2).toLong()
         }
+
+        val accOk = if (accuracy.isNaN()) 0.0 else accuracy
+        trip.onFix(l.elapsedRealtimeNanos / 1_000_000L, speedKmh, accOk)
+        profile.onFix(l.elapsedRealtimeNanos / 1_000_000L, nowMs(), speedKmh, correctedAltitude(), accOk)
+
+        // Avís sonor de velocitat (si està activat als ajustaments).
+        SpeedAlert.onFix(lastFixElapsedMs, speedKmh)
 
         val now = SystemClock.elapsedRealtime()
         if (now - lastSaveElapsed > 15000L) {

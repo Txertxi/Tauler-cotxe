@@ -33,11 +33,11 @@ object Cfg {
     /** Per sota d'aquesta velocitat el rumb del GPS no és fiable: es manté l'últim. */
     const val HEADING_MIN_KMH = 5.0
 
-    /** Final fix de l'eix de velocitat del gràfic de la pàgina Conducció (km/h). */
-    const val CHART_KMH_MAX = 140.0
-
-    /** Graella i números de l'eix de velocitat del gràfic: cada 20 km/h, de 0 a 140. */
+    /** Eix de velocitat dels gràfics: variable, de 0 al màxim de la finestra, amb graella cada 20 km/h. */
     const val CHART_KMH_STEP = 20.0
+
+    /** Final mínim de l'eix de velocitat (km/h), perquè un viatge molt lent no quedi desproporcionat. */
+    const val CHART_KMH_MIN_TOP = 60.0
 
     /**
      * Alçada (dp) que va guanyar la pàgina quan la barra de baix va passar de 104 a 64 dp.
@@ -249,23 +249,30 @@ class AlertLogic {
 }
 
 /**
- * Perfil del viatge: velocitat i alçada a intervals regulars, per al gràfic de la pàgina Conducció.
+ * Perfil del viatge: velocitat i alçada a intervals regulars, amb l'hora real de cada mostra.
  * Només s'hi anota mentre el cotxe es mou (o fa menys de 2 minuts que s'ha aturat): una parada
- * llarga amb la unitat encesa no estira el gràfic.
+ * llarga amb la unitat encesa no omple el gràfic de mostres.
  *
- * Només es guarden les darreres [WINDOW_MIN] minuts (finestra mòbil): quan s'omple, la mostra
- * més antiga surt per l'esquerra. El gràfic no es comprimeix mai, per llarg que sigui el viatge.
- * Les estadístiques d'alçada (mínima, màxima, mitjana) es porten a part, acumulades sobre
- * TOT el viatge, perquè no depenen de la finestra.
+ * Es guarden les darreres [WINDOW_PROFILE_MIN] minuts (3 hores): quan s'omple, la mostra més
+ * antiga surt per l'esquerra. Els gràfics trien la finestra que mostren (25 min a Conducció, 3 h al
+ * Perfil V) i, com que cada mostra porta l'hora, una parada llarga es veu com un forat al traç.
+ * Les estadístiques d'alçada (mínima, màxima, mitjana) s'acumulen a part, sobre TOT el viatge.
  */
 class TripProfile {
     var n = 0
         private set
+
+    /** Hora (ms d'epoch) de cada mostra. */
+    val t = LongArray(CAP)
     val speed = FloatArray(CAP)
 
     /** Alçada corregida (m); NaN = sense lectura. */
     val alt = FloatArray(CAP)
     var dirty = false
+        private set
+
+    /** Hora (ms d'epoch) de la primera mostra des de l'últim «Posa a zero»; 0 si encara no n'hi ha. */
+    var startMs = 0L
         private set
 
     // Alçades de tot el viatge (no de la finestra).
@@ -281,6 +288,7 @@ class TripProfile {
 
     fun clear() {
         n = 0
+        startMs = 0L
         nextMs = -1L
         lastMovingMs = -1L
         spdSm = 0.0
@@ -303,8 +311,11 @@ class TripProfile {
         altCnt++
     }
 
-    /** `elapsedMs`: rellotge monòton (ms); `altM`: alçada corregida (NaN si no n'hi ha). */
-    fun onFix(elapsedMs: Long, kmh: Double, altM: Double, accuracyM: Double) {
+    /**
+     * `elapsedMs`: rellotge monòton (ms), per al ritme de les mostres; `wallMs`: hora real (ms d'epoch);
+     * `altM`: alçada corregida (NaN si no n'hi ha).
+     */
+    fun onFix(elapsedMs: Long, wallMs: Long, kmh: Double, altM: Double, accuracyM: Double) {
         if (accuracyM > TripCalc.MAX_ACCURACY_M) return
         var v = if (kmh.isNaN() || kmh < 0.0 || kmh > 350.0) 0.0 else kmh
         if (v < Cfg.STOP_KMH) v = 0.0
@@ -319,6 +330,10 @@ class TripProfile {
         if (nextMs >= 0L && elapsedMs < nextMs) return
         if (n == CAP) slide()
         nextMs = elapsedMs + STEP_MS
+        // Les hores han de ser estrictament creixents (l'hora GPS es corregeix a poc a poc).
+        val w = if (n > 0 && wallMs <= t[n - 1]) t[n - 1] + 1L else wallMs
+        if (n == 0) startMs = w
+        t[n] = w
         speed[n] = spdSm.toFloat()
         alt[n] = if (altSm.isNaN()) Float.NaN else altSm.toFloat()
         if (!altSm.isNaN()) addStat(alt[n].toDouble())
@@ -328,29 +343,56 @@ class TripProfile {
 
     /** Finestra mòbil: treu la mostra més antiga i deixa lloc a una de nova al final. */
     private fun slide() {
+        System.arraycopy(t, 1, t, 0, CAP - 1)
         System.arraycopy(speed, 1, speed, 0, CAP - 1)
         System.arraycopy(alt, 1, alt, 0, CAP - 1)
         n = CAP - 1
     }
 
     /**
-     * [mínim, màxim, mitjana] de les alçades de TOT el viatge, o null si no n'hi ha. Són valors
-     * suavitzats (el soroll del GPS s'ha filtrat), així que un cim molt puntual pot quedar
-     * uns metres per sota del real.
+     * Límits [esquerra, dreta] (ms d'epoch) de la finestra de `windowMs` ms que ha de mostrar un gràfic.
+     * Mentre el viatge és més curt que la finestra, comença a l'hora d'inici i el traç neix a l'esquerra;
+     * després la finestra acompanya l'última mostra. Null si no hi ha cap mostra.
      */
-    fun altStats(): DoubleArray? {
-        if (altCnt == 0) return null
-        return doubleArrayOf(altLo, altHi, altSum / altCnt)
+    fun windowBounds(windowMs: Long): LongArray? {
+        if (n == 0) return null
+        val end = t[n - 1]
+        val left = if (startMs > 0L && end - startMs < windowMs) startMs else end - windowMs
+        return longArrayOf(left, left + windowMs)
     }
 
     /**
-     * Eix d'alçades del gràfic: del mínim al màxim de la finestra visible, arrodonits a 10 m i amb un
-     * marge mínim de 50 m perquè el soroll del GPS no es vegi com una muntanya. Null si no hi ha dades.
+     * Eix de velocitat [final, pas] per a la finestra `wb`: de 0 al màxim d'aquella finestra, arrodonit
+     * amunt a un múltiple del pas (20 km/h; 40 si passa de 160) i amb un final mínim de 60 km/h.
      */
-    fun altAxis(): DoubleArray? {
+    fun speedAxis(wb: LongArray?): DoubleArray {
+        var mx = 0.0
+        if (wb != null) {
+            for (i in 0 until n) {
+                if (t[i] < wb[0] || t[i] > wb[1]) continue
+                if (speed[i] > mx) mx = speed[i].toDouble()
+            }
+        }
+        var top = ceil(mx / Cfg.CHART_KMH_STEP) * Cfg.CHART_KMH_STEP
+        if (top < Cfg.CHART_KMH_MIN_TOP) top = Cfg.CHART_KMH_MIN_TOP
+        var step = Cfg.CHART_KMH_STEP
+        if (top > 160.0) {
+            step = Cfg.CHART_KMH_STEP * 2.0
+            top = ceil(top / step) * step
+        }
+        return doubleArrayOf(top, step)
+    }
+
+    /**
+     * Eix d'alçades per a la finestra `wb`: del mínim al màxim d'aquella finestra, arrodonits a 10 m i
+     * amb un marge mínim de 50 m perquè el soroll del GPS no es vegi com una muntanya. Null si no hi ha dades.
+     */
+    fun altAxis(wb: LongArray?): DoubleArray? {
+        if (wb == null) return null
         var lo = Double.MAX_VALUE
         var hi = -Double.MAX_VALUE
         for (i in 0 until n) {
+            if (t[i] < wb[0] || t[i] > wb[1]) continue
             val a = alt[i]
             if (a.isNaN()) continue
             if (a.toDouble() < lo) lo = a.toDouble()
@@ -365,18 +407,30 @@ class TripProfile {
         return doubleArrayOf(floor(lo / 10.0) * 10.0, ceil(hi / 10.0) * 10.0)
     }
 
+    /**
+     * [mínim, màxim, mitjana] de les alçades de TOT el viatge, o null si no n'hi ha. Són valors
+     * suavitzats (el soroll del GPS s'ha filtrat), així que un cim molt puntual pot quedar
+     * uns metres per sota del real.
+     */
+    fun altStats(): DoubleArray? {
+        if (altCnt == 0) return null
+        return doubleArrayOf(altLo, altHi, altSum / altCnt)
+    }
+
     /** Desa el perfil. S'escriu a un fitxer temporal i es canvia de nom: un tall de corrent no el corromp. */
     fun save(f: File) {
         try {
             val tmp = File(f.path + ".tmp")
             DataOutputStream(BufferedOutputStream(FileOutputStream(tmp))).use { o ->
                 o.writeInt(VERSION)
+                o.writeLong(startMs)
                 o.writeInt(n)
                 o.writeDouble(altLo)
                 o.writeDouble(altHi)
                 o.writeDouble(altSum)
                 o.writeInt(altCnt)
                 for (i in 0 until n) {
+                    o.writeLong(t[i])
                     o.writeFloat(speed[i])
                     o.writeFloat(alt[i])
                 }
@@ -391,80 +445,59 @@ class TripProfile {
         }
     }
 
+    /** Llegeix el perfil. Els fitxers d'altres versions (sense hores) s'ignoren: el perfil comença de zero. */
     fun load(f: File) {
         if (!f.exists()) return
         try {
             DataInputStream(BufferedInputStream(FileInputStream(f))).use { i ->
-                when (i.readInt()) {
-                    VERSION -> loadCurrent(i)
-                    VERSION_BETA5 -> loadBeta5(i)
-                    else -> return
+                if (i.readInt() != VERSION) return
+                val st = i.readLong()
+                val cnt = i.readInt()
+                val lo = i.readDouble()
+                val hi = i.readDouble()
+                val sum = i.readDouble()
+                val sc = i.readInt()
+                if (cnt < 0 || cnt > CAP || sc < 0) return
+                for (k in 0 until cnt) {
+                    t[k] = i.readLong()
+                    speed[k] = i.readFloat()
+                    alt[k] = i.readFloat()
                 }
+                n = cnt
+                startMs = st
+                altLo = lo
+                altHi = hi
+                altSum = sum
+                altCnt = sc
             }
             nextMs = -1L
             lastMovingMs = -1L
             dirty = false
         } catch (e: IOException) {
             n = 0
+            startMs = 0L
             resetStats()
         }
     }
 
-    private fun loadCurrent(i: DataInputStream) {
-        val cnt = i.readInt()
-        val lo = i.readDouble()
-        val hi = i.readDouble()
-        val sum = i.readDouble()
-        val sc = i.readInt()
-        if (cnt < 0 || cnt > CAP || sc < 0) return
-        for (k in 0 until cnt) {
-            speed[k] = i.readFloat()
-            alt[k] = i.readFloat()
-        }
-        n = cnt
-        altLo = lo
-        altHi = hi
-        altSum = sum
-        altCnt = sc
-    }
-
-    /**
-     * Fitxer de la Beta 5 (tot el viatge, amb mostres ajuntades): se'n conserven les darreres
-     * mostres per a la finestra i les estadístiques es recalculen amb totes.
-     */
-    private fun loadBeta5(i: DataInputStream) {
-        val st = i.readLong()
-        val cnt = i.readInt()
-        if (st < STEP_MS || st > STEP_MS * 1024L || cnt < 0 || cnt > OLD_CAP) return
-        val sp = FloatArray(cnt)
-        val al = FloatArray(cnt)
-        for (k in 0 until cnt) {
-            sp[k] = i.readFloat()
-            al[k] = i.readFloat()
-        }
-        resetStats()
-        for (k in 0 until cnt) if (!al[k].isNaN()) addStat(al[k].toDouble())
-        val keep = if (cnt > CAP) CAP else cnt
-        val from = cnt - keep
-        for (k in 0 until keep) {
-            speed[k] = sp[from + k]
-            alt[k] = al[from + k]
-        }
-        n = keep
-    }
-
     companion object {
-        /** Minuts que mostra el gràfic (finestra mòbil). */
-        const val WINDOW_MIN = 25
+        /** Minuts que mostra el gràfic de Conducció. */
+        const val WINDOW_DRIVE_MIN = 25
+
+        /** Minuts que mostra el Perfil V (i que es guarden). */
+        const val WINDOW_PROFILE_MIN = 180
+        const val WINDOW_DRIVE_MS = WINDOW_DRIVE_MIN * 60000L
+        const val WINDOW_PROFILE_MS = WINDOW_PROFILE_MIN * 60000L
 
         /** Una mostra cada 10 s. */
         const val STEP_MS = 10000L
-        const val CAP = WINDOW_MIN * 60 * 1000 / 10000
+        const val CAP = (WINDOW_PROFILE_MS / STEP_MS).toInt()
+
+        /** Si entre dues mostres passa més d'això, el traç es talla (el cotxe s'ha aturat de debò). */
+        const val GAP_MS = 35000L
         const val IDLE_MS = 120000L
         const val MIN_SPAN_M = 50.0
-        private const val OLD_CAP = 2400
-        private const val VERSION = 2
-        private const val VERSION_BETA5 = 1
+        private const val VERSION = 3
     }
 }
 

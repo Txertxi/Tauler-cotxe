@@ -38,6 +38,12 @@ class MainActivity : Activity() {
     private val tabNames = arrayOf("Conducció", "Viatge", "Ajustaments")
     private val tabButtons = ArrayList<Button>()
     private lateinit var pages: Array<View>
+
+    /** Perfil V: pàgina extra que penja de Viatge (no té pestanya pròpia). */
+    private lateinit var profilePage: ProfilePage
+    private lateinit var mapPanel: MapPanel
+    private lateinit var mapInfo: TextView
+    private lateinit var mapDimBtn: Button
     private var current = 0
 
     // Peces de la pantalla d'ajustaments que s'han d'actualitzar.
@@ -69,9 +75,15 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         UiState.visible = true
+        mapPanel.refresh()
         GpsHub.permissionOk = hasLocationPermission()
         if (GpsHub.permissionOk && !GpsHub.serviceRunning) startGpsService()
         if (current == TAB_SETTINGS) refreshSettings()
+    }
+
+    override fun onDestroy() {
+        mapPanel.destroy()
+        super.onDestroy()
     }
 
     override fun onPause() {
@@ -172,12 +184,30 @@ class MainActivity : Activity() {
         val drive = DrivePage(this)
         val trip = TripPage(this)
         trip.onReset = { confirmResetTrip() }
+        trip.onProfile = { showProfile() }
+        profilePage = ProfilePage(this)
+        profilePage.onBack = { selectTab(TAB_TRIP) }
         pages = arrayOf(drive, trip, buildSettings())
+        mapPanel = MapPanel(this)
+        mapPanel.onNeedPermission = { openAllFilesSettings() }
+        drive.onMapRect = { l, t, r, b ->
+            val lp = FrameLayout.LayoutParams(r - l, b - t)
+            lp.leftMargin = l
+            lp.topMargin = t
+            lp.gravity = Gravity.TOP or Gravity.START
+            mapPanel.post { mapPanel.layoutParams = lp }
+        }
 
         val content = FrameLayout(this)
         for (p in pages) {
             content.addView(p, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         }
+        content.addView(
+            profilePage,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        )
+        // El mapa va damunt de la pàgina Conducció, al rectangle que ella li indica.
+        content.addView(mapPanel, FrameLayout.LayoutParams(1, 1))
         root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
         // Barra de botons d'apps
@@ -201,8 +231,16 @@ class MainActivity : Activity() {
         return root
     }
 
+    /** Mostra el Perfil V; la pestanya «Viatge» continua marcada. */
+    private fun showProfile() {
+        pages[TAB_TRIP].visibility = View.GONE
+        profilePage.visibility = View.VISIBLE
+    }
+
     private fun selectTab(i: Int) {
         current = i
+        profilePage.visibility = View.GONE
+        mapPanel.visibility = if (i == 0) View.VISIBLE else View.GONE
         for (j in pages.indices) {
             pages[j].visibility = if (j == i) View.VISIBLE else View.GONE
         }
@@ -567,6 +605,19 @@ class MainActivity : Activity() {
         returnInfo = label("", 22f, Pal.GRAY)
         col.addView(returnInfo)
 
+        // --- Mapa
+        header(col, "Mapa")
+        mapInfo = label("", 22f, Color.WHITE)
+        col.addView(mapInfo)
+        addButton(col, bigButton("Permet «Accés a tots els fitxers»") { openAllFilesSettings() })
+        mapDimBtn = bigButton("") {
+            Prefs.mapDim = !Prefs.mapDim
+            mapPanel.applyDim()
+            refreshSettings()
+        }
+        addButton(col, mapDimBtn)
+        hint(col, "Els mapes (fitxers .map d'OpenAndroMaps) van a la carpeta «Mapes», a l'arrel de la memòria interna. Android demana el permís «Accés a tots els fitxers» perquè l'app pugui llegir-los. El mapa té el nord sempre amunt i el cotxe al centre.")
+
         // --- Viatge
         header(col, "Viatge")
         addButton(col, bigButton("Posa el viatge a zero") { confirmResetTrip() })
@@ -590,7 +641,7 @@ class MainActivity : Activity() {
         })
         hint(col, "Per veure quines tecles del volant arriben a l'app. Per tornar, fes servir el botó de tornar de la unitat.")
 
-        val ver = label("Federicu Tauler V1", 18f, Pal.GRAY)
+        val ver = label("Federicu Tauler V2 (Beta 1.2)", 18f, Pal.GRAY)
         ver.setPadding(0, dp(24f), 0, 0)
         col.addView(ver)
         return sv
@@ -609,6 +660,23 @@ class MainActivity : Activity() {
             )
         } catch (e: Exception) {
             Toast.makeText(this, "Aquesta unitat no obre aquesta pantalla: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun openAllFilesSettings() {
+        try {
+            startActivity(
+                Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (e: Exception) {
+            try {
+                startActivity(
+                    Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            } catch (e2: Exception) {
+                Toast.makeText(this, "Aquesta unitat no obre aquesta pantalla: ${e2.message}", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
@@ -631,6 +699,8 @@ class MainActivity : Activity() {
         alertChBtn.text = "Canal de l'avís: " + SpeedAlert.CHANNEL_NAMES[Prefs.alertChannel]
         delayInfo.text = "Retard abans de tornar: " + Prefs.returnDelayMs + " ms"
         overlayInfo.text = "«Mostrar sobre altres apps»: " + (if (Settings.canDrawOverlays(this)) "permès" else "no permès")
+        mapInfo.text = mapPanel.info()
+        mapDimBtn.text = "Mapa atenuat (nit): " + onOff(Prefs.mapDim)
         returnInfo.text = "Últim retorn al tauler: " + Returner.lastResult
         gpsInfo.text = GpsHub.statusLabel() + " — satèl·lits " + GpsHub.satsUsed + "/" + GpsHub.satsVisible +
             "   Servei: " + (if (GpsHub.serviceRunning) "actiu" else "aturat")
@@ -638,6 +708,7 @@ class MainActivity : Activity() {
 
     private companion object {
         const val REQ_LOCATION = 1
+        const val TAB_TRIP = 1
         const val TAB_SETTINGS = 2
     }
 }

@@ -11,8 +11,8 @@ android {
         applicationId = "cat.sergibonet.tauler"
         minSdk = 30
         targetSdk = 33
-        versionCode = 9
-        versionName = "1.0"
+        versionCode = 11
+        versionName = "2.0-beta1.2"
     }
 
     // Clau fixa (inclosa al projecte) perquè cada versió nova es pugui instal·lar
@@ -40,4 +40,10 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+dependencies {
+    // Mapes vectorials sense connexió (OpenStreetMap)
+    implementation("org.mapsforge:mapsforge-map-android:0.25.0")
+    implementation("org.mapsforge:mapsforge-themes:0.25.0")
 }
